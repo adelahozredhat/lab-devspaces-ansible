@@ -1,0 +1,187 @@
+---
+# Título: Playbook para crear un nuevo repositorio, su webhook y notificar
+# Ejecutable desde AAP/AWX
+- name: Install components in Openshift
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  vars:
+    crc_url_api_client: "https://api.cluster-jzlh2.dynamic.redhatworkshops.io:6443"
+    crc_user: "admin"
+    crc_password: "ArQyovQ5D5AOyY3L"
+    crc_validate_certs: false
+
+    devspaces: "https://devspaces.apps.cluster-jzlh2.dynamic.redhatworkshops.io"
+
+    gitea: "https://repository-gitea-operator.apps.cluster-jzlh2.dynamic.redhatworkshops.io"
+
+    num_users: 10
+
+  tasks:
+
+    - name: 
+      shell: "oc login --insecure-skip-tls-verify -u {{crc_user}} -p {{crc_password}} {{crc_url_api_client}} "
+
+    - name: 
+      shell: oc whoami --show-token
+      register: token
+
+    - name: Install Devspaces Operator
+      kubernetes.core.k8s:
+        state: present
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{crc_validate_certs}}"
+        src: devspace-operator.yaml
+      register: step
+      until: step.result.results| json_query('[?result.status.currentCSV]| [0].result.status.currentCSV') is defined and (step.result.results | json_query('[?result.status.currentCSV] | [0].result.status.currentCSV')) is not none
+      retries: "25"
+      delay: "20"
+
+    - name: Report Operator Status
+      ansible.builtin.debug:
+        msg: "{{step.result.results| json_query('[?result.status.currentCSV]| [0].result.status.currentCSV')}}"
+
+    - name: Get ClusterServiceVersion (CSV) status
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        name: "{{step.result.results| json_query('[?result.status.currentCSV]| [0].result.status.currentCSV')}}"
+        namespace: "openshift-devspaces"
+      register: csv_status_check
+      until: csv_status_check.resources| json_query('[?status.phase]| [0].status.phase') == "Succeeded"
+      retries: "15"
+      delay: "20"
+
+    - name: Report Operator Status
+      ansible.builtin.debug:
+        msg: "{{csv_status_check.resources| json_query('[?status.phase]| [0].status.phase')}}"
+
+    - name: Install Devspaces Instance
+      kubernetes.core.k8s:
+        state: present
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{crc_validate_certs}}"
+        src: devspaces-instance.yaml
+      register: step3
+      
+    - name: ✅ Wait for the URL to be available (HTTP 200)
+      ansible.builtin.uri:
+        url: "{{devspaces}}/dashboard/"
+        method: GET
+        status_code: 403 # The desired HTTP status code
+        validate_certs: false # Set to true if using proper SSL/TLS certificates
+      register: app_status_check
+      until: app_status_check.status == 403
+      retries: "50"
+      delay: "20"
+      delegate_to: localhost
+
+    - name: Openshift Virtualization Sub Yaml push on openshift
+      kubernetes.core.k8s:
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{crc_validate_certs}}"
+        state: present
+        src: openshift-virtualization.yaml
+      register: step
+      until: step.result.results| json_query('[?result.status.currentCSV]| [0].result.status.currentCSV') is defined and (step.result.results | json_query('[?result.status.currentCSV] | [0].result.status.currentCSV')) is not none
+      retries: "10"
+      delay: "15"
+
+    - name: Report Operator Status
+      ansible.builtin.debug:
+        msg: "{{step.result.results| json_query('[?result.status.currentCSV]| [0].result.status.currentCSV')}}"
+
+    - name: Get ClusterServiceVersion (CSV) status
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        name: "{{step.result.results| json_query('[?result.status.currentCSV]| [0].result.status.currentCSV')}}"
+        namespace: "openshift-cnv"
+      register: csv_status_check
+      until: csv_status_check.resources| json_query('[?status.phase]| [0].status.phase') == "Succeeded"
+      retries: "20"
+      delay: "20"
+
+    - name: Openahift Virtualization Hyper Converged Sub Yaml push on openshift
+      kubernetes.core.k8s:
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{crc_validate_certs}}"
+        state: present
+        src: openshift-virtualization-hyper-converged.yaml
+      register: step
+      until: step.result.status is defined and step.result.status.systemHealthStatus == "healthy"
+      retries: "15"
+      delay: "25"
+
+    - name: Report Operator Status
+      ansible.builtin.debug:
+        msg: "{{step.result.status.systemHealthStatus}}"
+
+    - name: FEdora VirtualMachine Yaml push on openshift
+      kubernetes.core.k8s:
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{crc_validate_certs}}"
+        definition: "{{ lookup('template', 'openshift-virtualization-machine-fedora.yaml.j2') | from_yaml_all }}"
+        state: present
+      register: step
+      until: step.result is defined and step.result.results| json_query('[?result.status.printableStatus]| [0].result.status.printableStatus') == 'Running'
+      retries: "10"
+      delay: "15"
+
+    - name: Install gitea Operator
+      kubernetes.core.k8s:
+        state: present
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{crc_validate_certs}}"
+        src: gitea.yaml
+      register: step
+      until: step.result.results| json_query('[?result.status.currentCSV]| [0].result.status.currentCSV') is defined and (step.result.results | json_query('[?result.status.currentCSV] | [0].result.status.currentCSV')) is not none
+      retries: "25"
+      delay: "20"
+
+    - name: Report Operator Status
+      ansible.builtin.debug:
+        msg: "{{step.result.results| json_query('[?result.status.currentCSV]| [0].result.status.currentCSV')}}"
+
+    - name: Get ClusterServiceVersion (CSV) status
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        name: "{{step.result.results| json_query('[?result.status.currentCSV]| [0].result.status.currentCSV')}}"
+        namespace: "openshift-devspaces"
+      register: csv_status_check
+      until: csv_status_check.resources| json_query('[?status.phase]| [0].status.phase') == "Succeeded"
+      retries: "15"
+      delay: "20"
+
+    - name: Report Operator Status
+      ansible.builtin.debug:
+        msg: "{{csv_status_check.resources| json_query('[?status.phase]| [0].status.phase')}}"
+
+    - name: Install Gitea Instance
+      kubernetes.core.k8s:
+        state: present
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{crc_validate_certs}}"
+        src: gitea-instance.yaml
+      register: step3
+      
+    - name: ✅ Wait for the URL to be available (HTTP 200)
+      ansible.builtin.uri:
+        url: "{{gitea}}"
+        method: GET
+        status_code: 200 # The desired HTTP status code
+        validate_certs: false # Set to true if using proper SSL/TLS certificates
+      register: app_status_check
+      until: app_status_check.status == 200
+      retries: "50"
+      delay: "20"
+      delegate_to: localhost
