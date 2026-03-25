@@ -1,0 +1,24 @@
+Info general Laboratorio:
+
+API URL: {{ crc_url_api_client }}
+Cluster_console: {{ crc_url_console_client }}
+Admin Password: {{ crc_password }}
+Cluster_domain: {{ cluster_domain }}
+
+Usuarios:
+{% for i in range(1, num_users|int +1) %}
+
+DevSpaces URL: {{ devspaces }}
+DevSpaces User: {{ usuarios_finales["user"~i].user }}
+DevSpaces Password: {{ usuarios_finales["user"~i].password }}
+Gitea URL: {{ gitea }}
+Gitea User: lab-user-{{ i }}
+Gitea Password: openshift
+Login Openshift Info: {{ usuarios_finales["user"~i].login_command }}
+Openshift Console URL: {{ usuarios_finales["user"~i].openshift_console_url }}
+User: {{ usuarios_finales["user"~i].user }}
+Password: {{ usuarios_finales["user"~i].password }}
+
+{{info_machines[i-1]}}
+
+{% endfor %}

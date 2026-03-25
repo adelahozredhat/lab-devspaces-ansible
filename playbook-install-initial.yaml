@@ -5,20 +5,39 @@
   hosts: localhost
   connection: local
   gather_facts: no
+  vars_files:
+    - "../lab_creation.yaml"
 
   vars:
-    crc_url_api_client: "https://api.cluster-jzlh2.dynamic.redhatworkshops.io:6443"
     crc_user: "admin"
-    crc_password: "ArQyovQ5D5AOyY3L"
     crc_validate_certs: false
 
-    devspaces: "https://devspaces.apps.cluster-jzlh2.dynamic.redhatworkshops.io"
-
-    gitea: "https://repository-gitea-operator.apps.cluster-jzlh2.dynamic.redhatworkshops.io"
-
-    num_users: 10
-
   tasks:
+    - name: Extraer la URL de la API de OpenShift
+      set_fact:
+        crc_url_api_client: "{{ status.summary.provision_data.openshift_api_url }}"
+        crc_url_console_client: "{{ status.summary.provision_data.openshift_cluster_console_url }}"
+        crc_password: "{{ status.summary.provision_data.openshift_cluster_admin_password }}"
+        usuarios_finales: "{{ status.summary.provision_data.users }}"
+        cluster_domain: "{{ status.summary.provision_data.openshift_api_url | regex_replace('^https://api\\.(.*):6443$', '\\1') }}"
+        num_users: "{{ status.summary.provision_data.users | length }}"
+
+    - name: Extraer la URL de la API de OpenShift
+      set_fact:
+        devspaces: "https://devspaces.apps.{{cluster_domain}}"
+        gitea: "https://repository-gitea-operator.apps.{{cluster_domain}}"
+
+    - name: Resumen de acceso administrativo
+      debug:
+        msg: 
+          - "API URL: {{ crc_url_api_client }}"
+          - "Console URL: {{crc_url_console_client}}"
+          - "Admin Password: {{ crc_password }}"
+          - "Users info_machines: {{ usuarios_finales }}"
+          - "cluster_domain: {{ cluster_domain }}"
+          - "devspaces: {{ devspaces }}"
+          - "gitea: {{ gitea }}"
+          - "num_users: {{ num_users }}"
 
     - name: 
       shell: "oc login --insecure-skip-tls-verify -u {{crc_user}} -p {{crc_password}} {{crc_url_api_client}} "
@@ -37,7 +56,7 @@
       register: step
       until: step.result.results| json_query('[?result.status.currentCSV]| [0].result.status.currentCSV') is defined and (step.result.results | json_query('[?result.status.currentCSV] | [0].result.status.currentCSV')) is not none
       retries: "25"
-      delay: "20"
+      delay: "25"
 
     - name: Report Operator Status
       ansible.builtin.debug:
@@ -171,7 +190,7 @@
         host: "{{ crc_url_api_client }}"
         api_key: "{{ token.stdout }}"
         validate_certs: "{{crc_validate_certs}}"
-        src: gitea-instance.yaml
+        definition: "{{ lookup('template', 'gitea-instance.yaml.j2') | from_yaml_all }}"
       register: step3
       
     - name: ✅ Wait for the URL to be available (HTTP 200)
@@ -184,4 +203,39 @@
       until: app_status_check.status == 200
       retries: "50"
       delay: "20"
+      delegate_to: localhost
+
+    - name: Get Ips Fedora Virtual Machines
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        namespace: "virtualization-test-user{{ item }}"
+        name: "fedora-user{{ item }}"
+      loop: "{{ range(1, num_users | int + 1) | list }}"
+      register: vmi_results
+
+    - name: Initialice info_machines
+      set_fact:
+        info_machines: []
+
+    - name: Debug info
+      set_fact:
+        info_machines: "{{ info_machines + ['Machine name: ' ~ item.resources | json_query('[*].metadata.name | [0]') ~ ' ip: ' ~ item.resources | json_query('[*].status.interfaces[*].ipAddress | [0]') ~ ' user: ' ~ item.resources | json_query('[*].spec.volumes[*].cloudInitNoCloud.userData | [0]') ] }}"
+      loop: "{{vmi_results.results}}"
+
+    - name: Debug info
+      debug:
+        var: item
+      loop: "{{info_machines}}"
+
+    - name: create some file
+      template: 
+        src: info-lab-users.txt.j2 
+        dest: ~/Correos/lab_correos/info-lab-users.txt
+      delegate_to: localhost
+
+    - name: create some file
+      template: 
+        src: info-lab-users.csv.j2 
+        dest: ~/Correos/lab_correos/info-lab-users.csv
       delegate_to: localhost

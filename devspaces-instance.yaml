@@ -11,8 +11,6 @@ spec:
       logLevel: INFO
     dashboard:
       logLevel: ERROR
-    metrics:
-      enable: true
   containerRegistry: {}
   devEnvironments:
     startTimeoutSeconds: 300

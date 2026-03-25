@@ -1,0 +1,4 @@
+Nombre Usuario|Correos|DevSpaces URL|DevSpaces User|DevSpaces Password|Gitea URL|Gitea User|Gitea Password|Openshift Login Cli|Openshift Console URL|Openshift User|Openshift Password|Info Fedora Machine
+{% for i in range(1, num_users|int +1) %}
+||{{ devspaces }}|{{ usuarios_finales["user"~i].user }}|{{ usuarios_finales["user"~i].password }}|{{ gitea }}|lab-user-{{ i }}|openshift|{{ usuarios_finales["user"~i].login_command }}|{{ usuarios_finales["user"~i].openshift_console_url }}|{{ usuarios_finales["user"~i].user }}|{{ usuarios_finales["user"~i].password }}|{{info_machines[i-1]}}
+{% endfor %}
