@@ -134,7 +134,7 @@
         src: openshift-virtualization-hyper-converged.yaml
       register: step
       until: step.result.status is defined and step.result.status.systemHealthStatus == "healthy"
-      retries: "15"
+      retries: "25"
       delay: "25"
 
     - name: Report Operator Status
@@ -174,7 +174,7 @@
         api_version: operators.coreos.com/v1alpha1
         kind: ClusterServiceVersion
         name: "{{step.result.results| json_query('[?result.status.currentCSV]| [0].result.status.currentCSV')}}"
-        namespace: "openshift-devspaces"
+        namespace: "gitea-operator"
       register: csv_status_check
       until: csv_status_check.resources| json_query('[?status.phase]| [0].status.phase') == "Succeeded"
       retries: "15"
