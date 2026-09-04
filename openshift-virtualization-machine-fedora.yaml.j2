@@ -7,6 +7,20 @@ metadata:
     openshift.io/cluster-monitoring: "true"
   name: virtualization-test-user{{ i }}
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: user{{ i }}-access
+  namespace: virtualization-test-user{{ i }}
+subjects:
+  - kind: User
+    name: "{{ usuarios_finales['user' ~ i].user }}"
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: admin
+  apiGroup: rbac.authorization.k8s.io
+---
 kind: Secret
 apiVersion: v1
 metadata:

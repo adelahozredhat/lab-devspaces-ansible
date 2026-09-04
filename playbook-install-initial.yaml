@@ -231,11 +231,11 @@
     - name: create some file
       template: 
         src: info-lab-users.txt.j2 
-        dest: ~/Correos/lab_correos/info-lab-users.txt
+        dest: ../info-lab-users.txt
       delegate_to: localhost
 
     - name: create some file
       template: 
         src: info-lab-users.csv.j2 
-        dest: ~/Correos/lab_correos/info-lab-users.csv
+        dest: ../info-lab-users.csv
       delegate_to: localhost
