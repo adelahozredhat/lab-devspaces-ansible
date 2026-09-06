@@ -1,0 +1,55 @@
+# cspell: disable=devspaces
+schemaVersion: 2.2.2
+metadata:
+  name: ansible-demo
+projects:
+  - name: lab-devspaces-ansible-instruction
+    git:
+      remotes:
+        origin: 'https://github.com/adelahozredhat/lab-devspaces-ansible-instruction.git'
+      checkoutFrom:
+        revision: master
+  - name: lab-devspaces-ansible-exercise1
+    git:
+      remotes:
+        origin: 'https://github.com/adelahozredhat/lab-devspaces-ansible-exercise1.git'
+      checkoutFrom:
+        revision: master
+  - name: lab-devspaces-ansible-exercise2
+    git:
+      remotes:
+        origin: 'https://github.com/adelahozredhat/lab-devspaces-ansible-exercise2.git'
+      checkoutFrom:
+        revision: master
+  - name: lab-devspaces-ansible-exercise3
+    git:
+      remotes:
+        origin: 'https://github.com/adelahozredhat/lab-devspaces-ansible-exercise3.git'
+      checkoutFrom:
+        revision: master
+  - name: lab-devspaces-ansible-exercise4
+    git:
+      remotes:
+        origin: 'https://github.com/adelahozredhat/lab-devspaces-ansible-exercise4.git'
+      checkoutFrom:
+        revision: master
+  - name: lab-devspaces-ansible-exercise5
+    git:
+      remotes:
+        origin: 'https://github.com/adelahozredhat/lab-devspaces-ansible-exercise5.git'
+      checkoutFrom:
+        revision: master
+components:
+  - name: tooling-container
+    container:
+      image: ghcr.io/ansible/ansible-devspaces@sha256:f833103c12adf6ecb3cc8245dbc2d852ec5025c8c487d601b96995ea8783fb2f
+      memoryRequest: 256M
+      memoryLimit: 6Gi
+      cpuRequest: 250m
+      cpuLimit: 2000m
+      args: ['tail', '-f', '/dev/null']
+      env:
+        - name: 'ANSIBLE_COLLECTIONS_PATH'
+          value: '~/.ansible/collections:/usr/share/ansible/collections:/projects/ansible-devspaces-demo/collections'
+        - name: 'KUBEDOCK_ENABLED'
+          value: "true"

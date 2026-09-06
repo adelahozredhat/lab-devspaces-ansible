@@ -1,0 +1,40 @@
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: repository-raw
+  namespace: gitea-operator
+spec:
+  host: "{{ gitea_raw_host }}"
+  to:
+    kind: Service
+    name: gitea-github-compat
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+    externalCertificate:
+      name: gitea-github-compat-tls
+  wildcardPolicy: None
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: repository-api
+  namespace: gitea-operator
+spec:
+  host: "{{ gitea_api_host }}"
+  to:
+    kind: Service
+    name: gitea-github-compat
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+    externalCertificate:
+      name: gitea-github-compat-tls
+  wildcardPolicy: None

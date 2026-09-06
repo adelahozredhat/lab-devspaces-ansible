@@ -11,6 +11,8 @@
   vars:
     crc_user: "admin"
     crc_validate_certs: false
+    gitea_user_password: openshift
+    instruction_repo: lab-devspaces-ansible-instruction
 
   tasks:
     - name: Extraer la URL de la API de OpenShift
@@ -203,6 +205,249 @@
       until: app_status_check.status == 200
       retries: "50"
       delay: "20"
+      delegate_to: localhost
+
+    # Dev Spaces pretends unknown Git hosts are GitHub Enterprise and calls
+    # raw.<gitea-host> / api.<gitea-host>. Those names are not in *.apps.<domain>.
+    # Fix is only in gitea-operator (public cert + path rewrite). CheCluster is left alone.
+    - name: Detectar el ClusterIssuer de cert-manager del certificado de ingress
+      kubernetes.core.k8s_info:
+        api_version: cert-manager.io/v1
+        kind: Certificate
+        name: cert-manager-ingress-cert
+        namespace: openshift-ingress
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{ crc_validate_certs }}"
+      register: ingress_certificate
+      failed_when: false
+
+    - name: Detectar un ClusterIssuer ACME si no hay certificado de ingress
+      kubernetes.core.k8s_info:
+        api_version: cert-manager.io/v1
+        kind: ClusterIssuer
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{ crc_validate_certs }}"
+      register: cluster_issuers
+      failed_when: false
+      when: ingress_certificate.resources | default([]) | length == 0
+
+    - name: Definir hosts GitHub-compat y el emisor TLS de Gitea
+      ansible.builtin.set_fact:
+        gitea_route_host: "{{ gitea | regex_replace('^https://', '') }}"
+        gitea_raw_host: "raw.{{ gitea | regex_replace('^https://', '') }}"
+        gitea_api_host: "api.{{ gitea | regex_replace('^https://', '') }}"
+        gitea_compat_issuer_name: "{{ (ingress_certificate.resources | default([]) | json_query('[0].spec.issuerRef.name')) or (cluster_issuers.resources | default([]) | selectattr('spec.acme', 'defined') | map(attribute='metadata.name') | list | first) }}"
+        gitea_compat_issuer_kind: "{{ (ingress_certificate.resources | default([]) | json_query('[0].spec.issuerRef.kind')) or 'ClusterIssuer' }}"
+
+    - name: Comprobar que hay un emisor ACME para raw/api de Gitea
+      ansible.builtin.assert:
+        that:
+          - gitea_compat_issuer_name | default('') | length > 0
+        fail_msg: "No hay ClusterIssuer/Certificate de cert-manager para emitir un certificado público de raw.<gitea> y api.<gitea>."
+
+    - name: Publicar el shim GitHub-compat de Gitea (proxy + certificado + Routes)
+      kubernetes.core.k8s:
+        state: present
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{ crc_validate_certs }}"
+        definition: "{{ lookup('template', 'gitea-github-compat.yaml.j2') | from_yaml_all }}"
+
+    - name: Esperar el certificado público de raw/api Gitea
+      kubernetes.core.k8s_info:
+        api_version: cert-manager.io/v1
+        kind: Certificate
+        name: gitea-github-compat-tls
+        namespace: gitea-operator
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{ crc_validate_certs }}"
+      register: gitea_compat_cert
+      until: gitea_compat_cert.resources | json_query('[0].status.conditions[?type==`Ready`].status') | first | default('') == 'True'
+      retries: 40
+      delay: 15
+
+    - name: Publicar las Routes raw/api de Gitea con el certificado emitido
+      kubernetes.core.k8s:
+        state: present
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{ crc_validate_certs }}"
+        definition: "{{ lookup('template', 'gitea-github-compat-routes.yaml.j2') | from_yaml_all }}"
+
+    - name: Esperar a que el proxy GitHub-compat de Gitea esté Available
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: gitea-github-compat
+        namespace: gitea-operator
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{ crc_validate_certs }}"
+      register: gitea_compat_deploy
+      until: gitea_compat_deploy.resources | json_query('[0].status.availableReplicas') | default(0) | int >= 1
+      retries: 20
+      delay: 10
+
+    # DNS-01 for raw./api. creates empty non-terminals that hide *.apps for the
+    # parent Gitea hostname. Publish explicit A records so laptops keep resolving.
+    - name: Resolver la IP pública del router *.apps
+      ansible.builtin.command:
+        argv: [dig, +short, "foo.apps.{{ cluster_domain }}", A]
+      register: apps_wildcard_ip
+      changed_when: false
+      delegate_to: localhost
+
+    - name: Leer el TSIG de cert-manager para DDNS
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: cert-manager-tsig-creds
+        namespace: cert-manager
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{ crc_validate_certs }}"
+      register: tsig_secret
+      no_log: true
+      failed_when: false
+
+    - name: Publicar registros A de Gitea (host, raw, api) en DDNS
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - |
+            import base64, subprocess, sys, tempfile, os
+            key_name, zone, ip, gitea_host, secret_b64 = sys.argv[1:6]
+            secret = base64.b64decode(secret_b64).decode()
+            keyfile = tempfile.NamedTemporaryFile("w", delete=False)
+            try:
+                keyfile.write(
+                    'key "%s." {\n    algorithm hmac-sha256;\n    secret "%s";\n};\n'
+                    % (key_name.replace('"', ""), secret.replace('"', '\\"'))
+                )
+                keyfile.close()
+                os.chmod(keyfile.name, 0o600)
+                nsupdate = """server ddns01.infra.demo.redhat.com
+            zone %s.
+            update add %s. 60 A %s
+            update add raw.%s. 60 A %s
+            update add api.%s. 60 A %s
+            send
+            """ % (zone, gitea_host, ip, gitea_host, ip, gitea_host, ip)
+                subprocess.run(
+                    ["nsupdate", "-v", "-k", keyfile.name],
+                    input=nsupdate,
+                    text=True,
+                    check=True,
+                )
+            finally:
+                try:
+                    os.unlink(keyfile.name)
+                except OSError:
+                    pass
+          - "{{ cluster_domain }}"
+          - dyn.redhatworkshops.io
+          - "{{ apps_wildcard_ip.stdout.splitlines() | first }}"
+          - "{{ gitea_route_host }}"
+          - "{{ tsig_secret.resources[0].data['tsig-secret'] }}"
+      when:
+        - tsig_secret.resources | default([]) | length > 0
+        - apps_wildcard_ip.stdout | default('') | length > 0
+      no_log: true
+      delegate_to: localhost
+
+    - name: Wait until Gitea has finished migrating repositories
+      kubernetes.core.k8s_info:
+        api_version: pfe.rhpds.com/v1
+        kind: Gitea
+        name: repository
+        namespace: gitea-operator
+      register: gitea_cr
+      until: gitea_cr.resources | json_query('[0].status.repoMigrationComplete') | default(false) | bool
+      retries: 40
+      delay: 20
+
+    - name: Wait until the instruction repository exists for each Gitea user
+      ansible.builtin.uri:
+        url: "{{ gitea }}/api/v1/repos/lab-user-{{ item }}/{{ instruction_repo }}"
+        method: GET
+        user: "lab-user-{{ item }}"
+        password: "{{ gitea_user_password }}"
+        force_basic_auth: true
+        status_code: 200
+        validate_certs: false
+      loop: "{{ range(1, num_users | int + 1) | list }}"
+      register: gitea_instruction_repo
+      until: gitea_instruction_repo.status == 200
+      retries: 30
+      delay: 10
+      delegate_to: localhost
+
+    - name: Prepare working directory for instruction checkouts
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/.work"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+
+    - name: Checkout lab-devspaces-ansible-instruction for each Gitea user
+      ansible.builtin.git:
+        repo: "https://lab-user-{{ item }}:{{ gitea_user_password }}@{{ gitea | regex_replace('^https://', '') }}/lab-user-{{ item }}/{{ instruction_repo }}.git"
+        dest: "{{ playbook_dir }}/.work/{{ instruction_repo }}-lab-user-{{ item }}"
+        version: master
+        force: true
+        update: true
+        accept_hostkey: true
+      environment:
+        GIT_SSL_NO_VERIFY: "true"
+      loop: "{{ range(1, num_users | int + 1) | list }}"
+      delegate_to: localhost
+
+    - name: Disable TLS verification on Gitea instruction clones
+      ansible.builtin.command:
+        argv:
+          - git
+          - config
+          - http.sslVerify
+          - "false"
+        chdir: "{{ playbook_dir }}/.work/{{ instruction_repo }}-lab-user-{{ item }}"
+      loop: "{{ range(1, num_users | int + 1) | list }}"
+      changed_when: false
+      delegate_to: localhost
+
+    - name: Render user-specific Devfile into each instruction checkout
+      ansible.builtin.template:
+        src: devfiles/devfile.yaml.j2
+        dest: "{{ playbook_dir }}/.work/{{ instruction_repo }}-lab-user-{{ item }}/devfile.yaml"
+        mode: "0644"
+      vars:
+        gitea_user: "lab-user-{{ item }}"
+      loop: "{{ range(1, num_users | int + 1) | list }}"
+      delegate_to: localhost
+
+    - name: Commit and push Devfile to each user's instruction repository
+      ansible.builtin.shell: |
+        set -euo pipefail
+        git add devfile.yaml
+        if git diff --cached --quiet; then
+          echo "NO_CHANGE"
+          exit 0
+        fi
+        git -c user.email="lab-user-{{ item }}@lab.local" \
+            -c user.name="lab-user-{{ item }}" \
+            commit -m "Add OpenShift Dev Spaces devfile for lab-user-{{ item }}"
+        git push origin HEAD
+        echo "PUSHED"
+      args:
+        chdir: "{{ playbook_dir }}/.work/{{ instruction_repo }}-lab-user-{{ item }}"
+      environment:
+        GIT_SSL_NO_VERIFY: "true"
+      loop: "{{ range(1, num_users | int + 1) | list }}"
+      register: instruction_devfile_push
+      changed_when: "'PUSHED' in instruction_devfile_push.stdout"
       delegate_to: localhost
 
     - name: Get Ips Fedora Virtual Machines

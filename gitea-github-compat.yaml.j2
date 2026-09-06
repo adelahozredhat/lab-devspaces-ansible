@@ -1,0 +1,208 @@
+# Dev Spaces treats unknown Git hosts as GitHub Enterprise and calls:
+#   https://raw.<gitea-host>/<owner>/<repo>/<ref>/<path>
+#   https://api.<gitea-host>/repos/<owner>/<repo>/...
+# Those names are not covered by the cluster wildcard *.apps.<domain>.
+# This shim stays in gitea-operator: it does not change the Dev Spaces operator or CheCluster.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gitea-github-compat-nginx
+  namespace: gitea-operator
+data:
+  default.conf: |
+    server {
+        listen 8080;
+        server_name ~^raw\.;
+
+        location = /healthz {
+            default_type text/plain;
+            return 200 'ok';
+        }
+
+        # Gitea native raw URL (after 303): /owner/repo/raw/branch/<ref>/<path>
+        location ~ ^/([^/]+)/([^/]+)/raw/ {
+            proxy_http_version 1.1;
+            proxy_set_header Host {{ gitea_route_host }};
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_pass http://repository.gitea-operator.svc.cluster.local:3000;
+        }
+
+        # GitHub-style raw: /owner/repo/<ref>/<path>
+        location ~ ^/([^/]+)/([^/]+)/(.+)$ {
+            rewrite ^/([^/]+)/([^/]+)/(.+)$ /$1/$2/raw/branch/$3 break;
+            proxy_http_version 1.1;
+            proxy_set_header Host {{ gitea_route_host }};
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_pass http://repository.gitea-operator.svc.cluster.local:3000;
+        }
+    }
+
+    server {
+        listen 8080;
+        server_name ~^api\.;
+
+        location = /healthz {
+            default_type text/plain;
+            return 200 'ok';
+        }
+
+        location = /rate_limit {
+            default_type application/json;
+            return 200 '{"resources":{"core":{"limit":5000,"remaining":4999,"reset":2147483647}}}';
+        }
+
+        # GitHub: GET /repos/{owner}/{repo}/commits/{ref}
+        # Gitea:  GET /api/v1/repos/{owner}/{repo}/git/commits/{ref}
+        location ~ ^/repos/([^/]+)/([^/]+)/commits/([^/]+)/?$ {
+            rewrite ^/repos/([^/]+)/([^/]+)/commits/([^/]+)/?$ /api/v1/repos/$1/$2/git/commits/$3 break;
+            proxy_http_version 1.1;
+            proxy_set_header Host {{ gitea_route_host }};
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_pass http://repository.gitea-operator.svc.cluster.local:3000;
+        }
+
+        location ~ ^/api/v3/repos/([^/]+)/([^/]+)/commits/([^/]+)/?$ {
+            rewrite ^/api/v3/repos/([^/]+)/([^/]+)/commits/([^/]+)/?$ /api/v1/repos/$1/$2/git/commits/$3 break;
+            proxy_http_version 1.1;
+            proxy_set_header Host {{ gitea_route_host }};
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_pass http://repository.gitea-operator.svc.cluster.local:3000;
+        }
+
+        location /api/v3/ {
+            rewrite ^/api/v3/(.*)$ /api/v1/$1 break;
+            proxy_http_version 1.1;
+            proxy_set_header Host {{ gitea_route_host }};
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_pass http://repository.gitea-operator.svc.cluster.local:3000;
+        }
+
+        location /repos/ {
+            rewrite ^/repos/(.*)$ /api/v1/repos/$1 break;
+            proxy_http_version 1.1;
+            proxy_set_header Host {{ gitea_route_host }};
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_pass http://repository.gitea-operator.svc.cluster.local:3000;
+        }
+
+        location / {
+            rewrite ^(.*)$ /api/v1$1 break;
+            proxy_http_version 1.1;
+            proxy_set_header Host {{ gitea_route_host }};
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_pass http://repository.gitea-operator.svc.cluster.local:3000;
+        }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitea-github-compat
+  namespace: gitea-operator
+  labels:
+    app: gitea-github-compat
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gitea-github-compat
+  template:
+    metadata:
+      labels:
+        app: gitea-github-compat
+    spec:
+      containers:
+        - name: nginx
+          image: quay.io/nginx/nginx-unprivileged:1.27
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d
+              readOnly: true
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: gitea-github-compat-nginx
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitea-github-compat
+  namespace: gitea-operator
+  labels:
+    app: gitea-github-compat
+spec:
+  selector:
+    app: gitea-github-compat
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: gitea-github-compat-tls
+  namespace: gitea-operator
+spec:
+  secretName: gitea-github-compat-tls
+  issuerRef:
+    name: "{{ gitea_compat_issuer_name }}"
+    kind: "{{ gitea_compat_issuer_kind }}"
+    group: cert-manager.io
+  dnsNames:
+    - "{{ gitea_raw_host }}"
+    - "{{ gitea_api_host }}"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gitea-github-compat-tls-router
+  namespace: gitea-operator
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["gitea-github-compat-tls"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gitea-github-compat-tls-router
+  namespace: gitea-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gitea-github-compat-tls-router
+subjects:
+  - kind: ServiceAccount
+    name: router
+    namespace: openshift-ingress

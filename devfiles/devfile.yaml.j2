@@ -1,0 +1,50 @@
+# cspell: disable=devspaces
+{#
+  Plantilla Ansible (Jinja2) de Devfile 2.2.2 para OpenShift Dev Spaces.
+
+  Variables (opcionales):
+    git_projects_base  URL base de los repositorios, sin barra final.
+                       Por defecto: https://github.com/adelahozredhat
+                       En el laboratorio Gitea:
+                         {{ gitea }}/{{ gitea_user }}
+                         p. ej. https://repository-gitea-operator.apps.<cluster>/lab-user-1
+    git_revision       Rama a clonar (por defecto: master)
+    gitea              URL de Gitea (si se define junto a gitea_user, sustituye git_projects_base)
+    gitea_user         Usuario Gitea (p. ej. lab-user-1)
+#}
+{% set git_projects = [
+  'lab-devspaces-ansible-instruction',
+  'lab-devspaces-ansible-exercise1',
+  'lab-devspaces-ansible-exercise2',
+  'lab-devspaces-ansible-exercise3',
+  'lab-devspaces-ansible-exercise4',
+  'lab-devspaces-ansible-exercise5',
+] %}
+{% set git_projects_base = (gitea ~ '/' ~ gitea_user) if (gitea is defined and gitea_user is defined) else (git_projects_base | default('https://github.com/adelahozredhat')) %}
+{% set git_revision = git_revision | default('master') %}
+schemaVersion: 2.2.2
+metadata:
+  name: ansible-demo
+projects:
+{% for project in git_projects %}
+  - name: {{ project }}
+    git:
+      remotes:
+        origin: '{{ git_projects_base }}/{{ project }}.git'
+      checkoutFrom:
+        revision: {{ git_revision }}
+{% endfor %}
+components:
+  - name: tooling-container
+    container:
+      image: ghcr.io/ansible/ansible-devspaces@sha256:f833103c12adf6ecb3cc8245dbc2d852ec5025c8c487d601b96995ea8783fb2f
+      memoryRequest: 256M
+      memoryLimit: 6Gi
+      cpuRequest: 250m
+      cpuLimit: 2000m
+      args: ['tail', '-f', '/dev/null']
+      env:
+        - name: 'ANSIBLE_COLLECTIONS_PATH'
+          value: '~/.ansible/collections:/usr/share/ansible/collections:/projects/ansible-devspaces-demo/collections'
+        - name: 'KUBEDOCK_ENABLED'
+          value: "true"
