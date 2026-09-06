@@ -4,6 +4,8 @@ Repositorio de Ansible para el **aprovisionamiento inicial del laboratorio OpenS
 
 Este repositorio **no crea el clúster**: instala operadores, instancias y contenido **dentro** de un OpenShift existente y genera ficheros de resumen en el host donde se ejecuta Ansible (`localhost`).
 
+**English version:** [README_EN.md](README_EN.md)
+
 ## Objetivo
 
 Instalar y dejar operativos, de forma automatizada:
