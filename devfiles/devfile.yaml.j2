@@ -11,6 +11,8 @@
     git_revision       Rama a clonar (por defecto: master)
     gitea              URL de Gitea (si se define junto a gitea_user, sustituye git_projects_base)
     gitea_user         Usuario Gitea (p. ej. lab-user-1)
+    workspace_node     Hostname del worker donde pinchar este workspace (round-robin
+                       en el playbook). Evita que todos caigan en el mismo nodo.
 #}
 {% set git_projects = [
   'lab-devspaces-ansible-instruction',
@@ -25,6 +27,24 @@
 schemaVersion: 2.2.2
 metadata:
   name: ansible-demo
+# Pin each student to a worker (set by the playbook). Topology spread is a
+# fallback; DevWorkspace drops namespaceSelector so TSC alone does not spread
+# pods that live in different userN-devspaces namespaces.
+attributes:
+  pod-overrides:
+    spec:
+{% if workspace_node is defined and workspace_node %}
+      nodeSelector:
+        kubernetes.io/hostname: "{{ workspace_node }}"
+{% endif %}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              controller.devfile.io/devworkspace_name: ansible-demo
+          namespaceSelector: {}
 projects:
 {% for project in git_projects %}
   - name: {{ project }}

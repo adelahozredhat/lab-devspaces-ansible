@@ -418,6 +418,21 @@
       changed_when: false
       delegate_to: localhost
 
+    - name: List worker nodes for workspace placement
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+        host: "{{ crc_url_api_client }}"
+        api_key: "{{ token.stdout }}"
+        validate_certs: "{{ crc_validate_certs }}"
+        label_selectors:
+          - node-role.kubernetes.io/worker
+      register: cluster_worker_nodes
+
+    - name: Compute dedicated worker hostnames for Dev Spaces
+      ansible.builtin.set_fact:
+        workspace_worker_hostnames: "{{ (cluster_worker_nodes.resources | map(attribute='metadata.name') | reject('match', '^control-plane') | list | sort) or (cluster_worker_nodes.resources | map(attribute='metadata.name') | list | sort) }}"
+
     - name: Render user-specific Devfile into each instruction checkout
       ansible.builtin.template:
         src: devfiles/devfile.yaml.j2
@@ -425,6 +440,7 @@
         mode: "0644"
       vars:
         gitea_user: "lab-user-{{ item }}"
+        workspace_node: "{{ workspace_worker_hostnames[(item | int - 1) % (workspace_worker_hostnames | length)] }}"
       loop: "{{ range(1, num_users | int + 1) | list }}"
       delegate_to: localhost
 

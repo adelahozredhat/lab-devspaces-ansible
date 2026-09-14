@@ -1,0 +1,260 @@
+---
+# Arranca un workspace Dev Spaces (ansible-demo) por cada alumno de info-lab-users.txt.
+# El Devfile se toma del repositorio de instrucciones de Gitea de ese usuario
+# (lab-devspaces-ansible-instruction), el mismo que usa Create Workspace en el dashboard.
+#
+#   ansible-playbook playbook-start-workspaces.yaml
+#   ansible-playbook playbook-start-workspaces.yaml -e info_lab_users_file=/ruta/info-lab-users.txt
+#   ansible-playbook playbook-start-workspaces.yaml -e users_filter=user1,user2
+#
+- name: Start Dev Spaces workspaces for lab users
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    info_lab_users_file: "{{ playbook_dir }}/../info-lab-users.txt"
+    instruction_repo: lab-devspaces-ansible-instruction
+    git_revision: master
+    workspace_name: ansible-demo
+    crc_user: admin
+    wait_for_running: true
+    wait_retries: 40
+    wait_delay: 15
+    users_filter: ""
+    work_dir: "{{ playbook_dir }}/.work/start-workspaces"
+
+  tasks:
+    - name: Comprobar que existe info-lab-users.txt
+      ansible.builtin.stat:
+        path: "{{ info_lab_users_file }}"
+      register: info_file
+
+    - name: Fallar si falta el fichero de usuarios
+      ansible.builtin.fail:
+        msg: "No se encuentra {{ info_lab_users_file }}. Genera el lab con playbook-install-initial.yaml o pasa -e info_lab_users_file=..."
+      when: not info_file.stat.exists
+
+    - name: Parsear info-lab-users.txt
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/scripts/parse_info_lab_users.py"
+          - "{{ info_lab_users_file }}"
+      register: parsed_info
+      changed_when: false
+
+    - name: Guardar datos del laboratorio
+      ansible.builtin.set_fact:
+        lab: "{{ parsed_info.stdout | from_json }}"
+
+    - name: Seleccionar usuarios
+      ansible.builtin.set_fact:
+        lab_users: "{{ lab.users if (users_filter | default('') | trim | length) == 0 else (lab.users | selectattr('user', 'in', users_filter | split(',') | map('trim') | list) | list) }}"
+
+    - name: Fallar si no hay usuarios
+      ansible.builtin.fail:
+        msg: "No hay usuarios que arrancar. Revisa info-lab-users.txt o users_filter."
+      when: lab_users | length == 0
+
+    - name: Resumen (sin contraseñas)
+      ansible.builtin.debug:
+        msg:
+          - "API: {{ lab.api_url }}"
+          - "Dev Spaces: {{ lab.devspaces_url }}"
+          - "Gitea: {{ lab.gitea_url }}"
+          - "Repo de instrucciones: {{ instruction_repo }} (rama {{ git_revision }})"
+          - "Workspace: {{ workspace_name }}"
+          - "Usuarios ({{ lab_users | length }}): {{ lab_users | map(attribute='user') | list }}"
+
+    - name: Crear directorio de trabajo
+      ansible.builtin.file:
+        path: "{{ work_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Login admin en OpenShift
+      ansible.builtin.command:
+        argv:
+          - oc
+          - login
+          - --insecure-skip-tls-verify=true
+          - -u
+          - "{{ crc_user }}"
+          - -p
+          - "{{ lab.admin_password }}"
+          - "{{ lab.api_url }}"
+      environment:
+        KUBECONFIG: "{{ work_dir }}/kube-admin"
+      no_log: true
+      changed_when: true
+
+    - name: Extraer editor che-code
+      ansible.builtin.shell: |
+        oc get configmap editors-definitions -n openshift-devspaces -o json \
+          | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin)["data"]["che-code.yaml"])' \
+          > "{{ work_dir }}/che-code.yaml"
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ work_dir }}/kube-admin"
+      changed_when: false
+
+    - name: Login de cada alumno en OpenShift
+      ansible.builtin.command:
+        argv:
+          - oc
+          - login
+          - --insecure-skip-tls-verify=true
+          - -u
+          - "{{ item.user }}"
+          - -p
+          - "{{ item.password }}"
+          - "{{ lab.api_url }}"
+      environment:
+        KUBECONFIG: "{{ work_dir }}/kube-{{ item.user }}"
+      loop: "{{ lab_users }}"
+      loop_control:
+        label: "{{ item.user }}"
+      no_log: true
+      changed_when: true
+
+    - name: Token de cada alumno
+      ansible.builtin.command:
+        argv:
+          - oc
+          - whoami
+          - --show-token
+      environment:
+        KUBECONFIG: "{{ work_dir }}/kube-{{ item.user }}"
+      loop: "{{ lab_users }}"
+      loop_control:
+        label: "{{ item.user }}"
+      register: user_tokens
+      no_log: true
+      changed_when: false
+
+    - name: Crear proyecto userN-devspaces si no existe
+      ansible.builtin.shell: |
+        if oc get project "{{ item.namespace }}" >/dev/null 2>&1; then
+          echo "EXISTS"
+          exit 0
+        fi
+        oc new-project "{{ item.namespace }}" --skip-config-write
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ work_dir }}/kube-{{ item.user }}"
+      loop: "{{ lab_users }}"
+      loop_control:
+        label: "{{ item.user }}"
+      register: new_projects
+      changed_when: true
+
+    - name: Provisionar namespace Che (etiquetas y RBAC de Dev Spaces)
+      ansible.builtin.shell: |
+        code="$(oc exec -n openshift-devspaces deploy/devspaces -- \
+          curl -sS -o /dev/null -w '%{http_code}' \
+          -X POST \
+          -H 'Authorization: Bearer {{ item.stdout }}' \
+          http://127.0.0.1:8080/api/kubernetes/namespace/provision)"
+        printf '%s\n' "${code}"
+        case "${code}" in
+          200|201) exit 0 ;;
+          *) echo "HTTP ${code}" >&2; exit 1 ;;
+        esac
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ work_dir }}/kube-admin"
+      loop: "{{ user_tokens.results }}"
+      loop_control:
+        label: "{{ item.item.user }}"
+      register: provision
+      no_log: true
+      changed_when: true
+
+    - name: Descargar Devfile del repo de instrucciones de cada usuario
+      ansible.builtin.uri:
+        url: "{{ item.gitea_url }}/{{ item.gitea_user }}/{{ instruction_repo }}/raw/branch/{{ git_revision }}/devfile.yaml"
+        method: GET
+        dest: "{{ work_dir }}/devfile-{{ item.user }}.yaml"
+        force: true
+        follow_redirects: all
+        validate_certs: false
+        status_code: 200
+      loop: "{{ lab_users }}"
+      loop_control:
+        label: "{{ item.gitea_user }}/{{ instruction_repo }}"
+
+    - name: Construir DevWorkspace (Devfile de Gitea + editor che-code)
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/scripts/build_devworkspace.py"
+          - --devfile
+          - "{{ work_dir }}/devfile-{{ item.user }}.yaml"
+          - --editor
+          - "{{ work_dir }}/che-code.yaml"
+          - --namespace
+          - "{{ item.namespace }}"
+          - --name
+          - "{{ workspace_name }}"
+          - --output
+          - "{{ work_dir }}/dw-{{ item.user }}.yaml"
+      loop: "{{ lab_users }}"
+      loop_control:
+        label: "{{ item.user }}"
+      changed_when: true
+
+    - name: Aplicar DevWorkspace como el alumno
+      ansible.builtin.command:
+        argv:
+          - oc
+          - apply
+          - -f
+          - "{{ work_dir }}/dw-{{ item.user }}.yaml"
+      environment:
+        KUBECONFIG: "{{ work_dir }}/kube-{{ item.user }}"
+      loop: "{{ lab_users }}"
+      loop_control:
+        label: "{{ item.user }}"
+
+    - name: Esperar a que todos los workspaces estén Running
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/scripts/wait_devworkspaces.py"
+          - "{{ work_dir }}/kube-admin"
+          - "{{ workspace_name }}"
+          - "{{ lab_users | map(attribute='namespace') | list | to_json }}"
+      register: wait_ws
+      until: wait_ws.rc == 0
+      retries: "{{ wait_retries }}"
+      delay: "{{ wait_delay }}"
+      changed_when: false
+      when: wait_for_running | bool
+
+    - name: Listado final de workspaces
+      ansible.builtin.command:
+        argv:
+          - oc
+          - get
+          - devworkspace
+          - -A
+          - --no-headers
+      environment:
+        KUBECONFIG: "{{ work_dir }}/kube-admin"
+      register: dw_list
+      changed_when: false
+
+    - name: Estado de los DevWorkspace
+      ansible.builtin.debug:
+        msg: "{{ dw_list.stdout_lines }}"
+
+    - name: URLs de los workspaces
+      ansible.builtin.debug:
+        msg: "{{ item.devspaces_url }}/{{ item.user }}/{{ workspace_name }}/3100/"
+      loop: "{{ lab_users }}"
+      loop_control:
+        label: "{{ item.user }}"

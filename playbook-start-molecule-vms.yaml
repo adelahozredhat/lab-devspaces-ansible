@@ -1,0 +1,139 @@
+---
+# Crea y arranca en cada userN-devspaces la VM Fedora de Molecule
+# (fedora-chocolate-smelt-74, containerDisk, 2Gi), la misma que define
+# lab-devspaces-ansible-exercise1/molecule/default/molecule.yml + create.yml.
+#
+#   ansible-playbook playbook-start-molecule-vms.yaml
+#   ansible-playbook playbook-start-molecule-vms.yaml -e users_filter=user1,user2
+#
+- name: Start Molecule Fedora VMs for lab users
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    info_lab_users_file: "{{ playbook_dir }}/../info-lab-users.txt"
+    crc_user: admin
+    vm_name: fedora-chocolate-smelt-74
+    vm_memory: 2Gi
+    vm_image: quay.io/containerdisks/fedora:latest
+    wait_for_running: true
+    wait_retries: 40
+    wait_delay: 15
+    users_filter: ""
+    work_dir: "{{ playbook_dir }}/.work/start-workspaces"
+
+  tasks:
+    - name: Comprobar que existe info-lab-users.txt
+      ansible.builtin.stat:
+        path: "{{ info_lab_users_file }}"
+      register: info_file
+
+    - name: Fallar si falta el fichero de usuarios
+      ansible.builtin.fail:
+        msg: "No se encuentra {{ info_lab_users_file }}. Genera el lab con playbook-install-initial.yaml o pasa -e info_lab_users_file=..."
+      when: not info_file.stat.exists
+
+    - name: Parsear info-lab-users.txt
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/scripts/parse_info_lab_users.py"
+          - "{{ info_lab_users_file }}"
+      register: parsed_info
+      changed_when: false
+
+    - name: Guardar datos del laboratorio
+      ansible.builtin.set_fact:
+        lab: "{{ parsed_info.stdout | from_json }}"
+
+    - name: Seleccionar usuarios
+      ansible.builtin.set_fact:
+        lab_users: "{{ lab.users if (users_filter | default('') | trim | length) == 0 else (lab.users | selectattr('user', 'in', users_filter | split(',') | map('trim') | list) | list) }}"
+
+    - name: Fallar si no hay usuarios
+      ansible.builtin.fail:
+        msg: "No hay usuarios. Revisa info-lab-users.txt o users_filter."
+      when: lab_users | length == 0
+
+    - name: Resumen
+      ansible.builtin.debug:
+        msg:
+          - "API: {{ lab.api_url }}"
+          - "VM: {{ vm_name }} ({{ vm_memory }}, {{ vm_image }})"
+          - "Usuarios ({{ lab_users | length }}): {{ lab_users | map(attribute='user') | list }}"
+
+    - name: Crear directorio de trabajo
+      ansible.builtin.file:
+        path: "{{ work_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Login admin en OpenShift
+      ansible.builtin.command:
+        argv:
+          - oc
+          - login
+          - --insecure-skip-tls-verify=true
+          - -u
+          - "{{ crc_user }}"
+          - -p
+          - "{{ lab.admin_password }}"
+          - "{{ lab.api_url }}"
+      environment:
+        KUBECONFIG: "{{ work_dir }}/kube-admin"
+      no_log: true
+      changed_when: true
+
+    - name: Generar manifiesto de VMs Molecule
+      ansible.builtin.template:
+        src: molecule-fedora-vm.yaml.j2
+        dest: "{{ work_dir }}/molecule-fedora-vms.yaml"
+        mode: "0600"
+
+    - name: Aplicar VMs Molecule en cada userN-devspaces
+      ansible.builtin.command:
+        argv:
+          - oc
+          - apply
+          - -f
+          - "{{ work_dir }}/molecule-fedora-vms.yaml"
+      environment:
+        KUBECONFIG: "{{ work_dir }}/kube-admin"
+      register: apply_vms
+      changed_when: true
+
+    - name: Esperar a que las VMs estén Running
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/scripts/wait_molecule_vms.py"
+          - "{{ work_dir }}/kube-admin"
+          - "{{ vm_name }}"
+          - "{{ lab_users | map(attribute='namespace') | list | to_json }}"
+      register: wait_vms
+      until: wait_vms.rc == 0
+      retries: "{{ wait_retries }}"
+      delay: "{{ wait_delay }}"
+      changed_when: false
+      when: wait_for_running | bool
+
+    - name: Listado de VMs Molecule
+      ansible.builtin.command:
+        argv:
+          - oc
+          - get
+          - vm
+          - -A
+          - -l
+          - lab.molecule-platform=true
+          - -o
+          - wide
+      environment:
+        KUBECONFIG: "{{ work_dir }}/kube-admin"
+      register: vm_list
+      changed_when: false
+
+    - name: Estado de las VMs
+      ansible.builtin.debug:
+        msg: "{{ vm_list.stdout_lines }}"

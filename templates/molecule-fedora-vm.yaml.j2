@@ -1,0 +1,40 @@
+{% for u in lab_users %}
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: {{ vm_name }}
+  namespace: {{ u.namespace }}
+  labels:
+    app: {{ vm_name }}
+    lab.molecule-platform: "true"
+spec:
+  running: true
+  template:
+    metadata:
+      labels:
+        kubevirt.io/domain: {{ vm_name }}
+        app: {{ vm_name }}
+    spec:
+      domain:
+        devices:
+          disks:
+            - name: containerdisk
+              disk:
+                bus: virtio
+          interfaces:
+            - name: default
+              masquerade: {}
+        memory:
+          guest: {{ vm_memory }}
+        resources:
+          requests:
+            memory: {{ vm_memory }}
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - name: containerdisk
+          containerDisk:
+            image: {{ vm_image }}
+{% endfor %}

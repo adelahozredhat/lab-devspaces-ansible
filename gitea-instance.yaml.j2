@@ -31,7 +31,8 @@ spec:
   giteaAdminEmail: opentlc-mgr@redhat.com
 
   giteaCreateUsers: true
-  giteaGenerateUserFormat: "lab-user-%d"
+  # Operator takes the format literally when giteaUserNumber is 1 ("%d" is not interpolated).
+  giteaGenerateUserFormat: "{{ 'lab-user-1' if (num_users | int) <= 1 else 'lab-user-%d' }}"
   giteaUserNumber: {{num_users|int}}
   giteaUserPassword: openshift
 

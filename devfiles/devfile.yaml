@@ -2,6 +2,19 @@
 schemaVersion: 2.2.2
 metadata:
   name: ansible-demo
+# Soft spread only (single-user / GitHub factory). The lab Gitea copy is
+# rendered from devfile.yaml.j2 and pins kubernetes.io/hostname per student.
+attributes:
+  pod-overrides:
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              controller.devfile.io/devworkspace_name: ansible-demo
+          namespaceSelector: {}
 projects:
   - name: lab-devspaces-ansible-instruction
     git:
