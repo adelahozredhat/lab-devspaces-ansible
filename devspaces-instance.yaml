@@ -13,7 +13,7 @@ spec:
       logLevel: ERROR
   containerRegistry: {}
   devEnvironments:
-    startTimeoutSeconds: 300
+    startTimeoutSeconds: 900
     secondsOfRunBeforeIdling: -1
     maxNumberOfWorkspacesPerUser: -1
     containerBuildConfiguration:
